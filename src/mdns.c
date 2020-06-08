@@ -108,7 +108,7 @@ mdns_list_interfaces(multicast_if** pp_intfs, struct mdns_ip **pp_mdns_ips, size
         multicast_if* intfs;
 
         *p_nb_intf = 0;
-        if (getifaddrs(&ifs) || ifs == NULL)
+        if (getifaddrs(&ifs) < 0 || ifs == NULL)
                 return (MDNS_NETERR);
         nb_if = 0;
         for (c = ifs; c != NULL; c = c->ifa_next) {
