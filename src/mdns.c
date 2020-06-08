@@ -377,14 +377,20 @@ mdns_init(struct mdns_ctx **p_ctx, const char *addr, unsigned short port)
         if (errno != 0)
                 return mdns_destroy(ctx), (MDNS_NETERR);
         res = mdns_resolve(ctx, addr, port);
-        if (res < 0)
+        if (res < 0) {
+		printf("mdns_resolve failed: %d\n", res);
                 return mdns_destroy(ctx), (res);
+	}
 
         for (size_t i = 0; i < ctx->nb_conns; ++i ) {
-                if ((ctx->conns[i].sock = socket(ctx->conns[i].mdns_ip.family, SOCK_DGRAM, IPPROTO_UDP)) == INVALID_SOCKET)
+                if ((ctx->conns[i].sock = socket(ctx->conns[i].mdns_ip.family, SOCK_DGRAM, IPPROTO_UDP)) == INVALID_SOCKET) {
+			printf("conn: %d, socket problem\n", i);
                         return mdns_destroy(ctx), (MDNS_NETERR);
-                if (setsockopt(ctx->conns[i].sock, SOL_SOCKET, SO_REUSEADDR, (const void *) &on_off, sizeof(on_off)) < 0)
+		}
+                if (setsockopt(ctx->conns[i].sock, SOL_SOCKET, SO_REUSEADDR, (const void *) &on_off, sizeof(on_off)) < 0) {
+			printf("conn: %d, setsocketopt problem\n", i);
                         return mdns_destroy(ctx), (MDNS_NETERR);
+		}
     #ifdef _WIN32
             /* bind the receiver on any local address */
             memset(&dumb, 0, sizeof(dumb));
@@ -400,20 +406,26 @@ mdns_init(struct mdns_ctx **p_ctx, const char *addr, unsigned short port)
             if (bind(ctx->conns[i].sock, (const struct sockaddr *) &dumb, ss_len(&dumb.ss)) < 0)
                     return mdns_destroy(ctx), (MDNS_NETERR);
 #else /* _WIN32 */
-            if (bind(ctx->conns[i].sock, (const struct sockaddr *) &ctx->addr, ss_len(&ctx->addr)) < 0)
+            if (bind(ctx->conns[i].sock, (const struct sockaddr *) &ctx->addr, ss_len(&ctx->addr)) < 0) {
+		    printf("conn: %d, failed to bind\n", i);
                     return mdns_destroy(ctx), (MDNS_NETERR);
+	    }
 #endif /* _WIN32 */
 
-            if (os_mcast_join(ctx->conns[i].sock, &ctx->addr, ctx->conns[i].if_addr) < 0)
+            if (os_mcast_join(ctx->conns[i].sock, &ctx->addr, ctx->conns[i].if_addr) < 0) {
+		    printf("conn: %d, failed to join multicast\n", i);
                     return mdns_destroy(ctx), (MDNS_NETERR);
+	    }
             if (setsockopt(ctx->conns[i].sock, ctx->conns[i].mdns_ip.family == AF_INET ? IPPROTO_IP : IPPROTO_IPV6,
                            ctx->conns[i].mdns_ip.family == AF_INET ? IP_MULTICAST_TTL : IPV6_MULTICAST_HOPS,
                            (const void *) &ttl, sizeof(ttl)) < 0) {
+		    printf("conn: %d, setsocketopt 2 problem\n", i);
                     return mdns_destroy(ctx), (MDNS_NETERR);
             }
 
             if (setsockopt(ctx->conns[i].sock, ctx->conns[i].mdns_ip.family == AF_INET ? IPPROTO_IP : IPPROTO_IPV6,
                            IP_MULTICAST_LOOP, (const void *) &loop, sizeof(loop)) < 0) {
+		    printf("conn: %d, setsocketopt 3 problem\n", i);
                     return mdns_destroy(ctx), (MDNS_NETERR);
             }
 
@@ -422,6 +434,7 @@ mdns_init(struct mdns_ctx **p_ctx, const char *addr, unsigned short port)
                            ctx->conns[i].mdns_ip.family == AF_INET ? IPPROTO_IP : IPPROTO_IPV6,
                            ctx->conns[i].mdns_ip.family == AF_INET ? IP_MULTICAST_IF : IPV6_MULTICAST_IF,
                            (const void*)&ctx->conns[i].if_addr, sizeof(ctx->conns[i].if_addr))) {
+		    printf("conn: %d, setsocketopt 4 problem\n", i);
                     return mdns_destroy(ctx), (MDNS_NETERR);
             }
 #endif
