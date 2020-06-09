@@ -33,6 +33,7 @@
 #include <errno.h>
 #include <time.h>
 #include <stdint.h>
+#include <arpa/inet.h>
 
 #include "compat.h"
 #include "utils.h"
@@ -78,6 +79,24 @@ extern void rr_free(struct rr_entry *);
 #ifndef _WIN32
 #if HAVE_GETIFADDRS
 
+static bool 
+mdns_is_ipv6(const char *ipAddress)
+{
+    struct sockaddr_in sa;
+    int result = inet_pton(AF_INET6, ipAddress, &(sa.sin_addr));
+    return result != 0;
+}
+
+// get sockaddr, IPv4 or IPv6:
+static void *get_in_addr(struct sockaddr *sa)
+{
+	if (sa->sa_family == AF_INET) {
+		return &(((struct sockaddr_in*)sa)->sin_addr);
+	}
+
+	return &(((struct sockaddr_in6*)sa)->sin6_addr);
+}
+
 static bool
 mdns_is_interface_valuable(struct ifaddrs* ifa)
 {
@@ -92,10 +111,15 @@ mdns_is_interface_valuable(struct ifaddrs* ifa)
             ifa->ifa_addr->sa_family == AF_INET6) &&
             (ifa->ifa_flags & IFF_LOOPBACK) == 0 &&
             (ifa->ifa_flags & IFF_UP) != 0 &&
-            (ifa->ifa_flags & IFF_RUNNING) != 0 &&
-            ((ifa->ifa_addr->sa_family == AF_INET6 &&
-                    saddr.sin6_scope_id == 0) ||
-                ifa->ifa_addr->sa_family == AF_INET);
+            (ifa->ifa_flags & IFF_RUNNING) != 0;
+//    return (ifa->ifa_addr->sa_family == AF_INET ||
+//            ifa->ifa_addr->sa_family == AF_INET6) &&
+//            (ifa->ifa_flags & IFF_LOOPBACK) == 0 &&
+//            (ifa->ifa_flags & IFF_UP) != 0 &&
+//            (ifa->ifa_flags & IFF_RUNNING) != 0 &&
+//            ((ifa->ifa_addr->sa_family == AF_INET6 &&
+//                    saddr.sin6_scope_id == 0) ||
+//                ifa->ifa_addr->sa_family == AF_INET);
 }
 
 static int
@@ -105,19 +129,31 @@ mdns_list_interfaces(multicast_if** pp_intfs, struct mdns_ip **pp_mdns_ips, size
         struct mdns_ip *mdns_ips;
         struct ifaddrs *c;
         size_t nb_if;
+	char ip_str[32];
         multicast_if* intfs;
+
+	fprintf(stderr, "Lookup interfaces for family: %d\n", ai_family);
 
         *p_nb_intf = 0;
         if (getifaddrs(&ifs) < 0 || ifs == NULL)
                 return (MDNS_NETERR);
         nb_if = 0;
         for (c = ifs; c != NULL; c = c->ifa_next) {
+		//if (c->ifa_addr != NULL) {
+		//	inet_ntop(c->ifa_addr->sa_family, get_in_addr(c->ifa_addr), &ip_str, sizeof(ip_str));
+		//} else {
+		//	memset(&ip_str[0], 0, sizeof(ip_str));
+		//}
+
+		//fprintf(stderr, "IF name: %s, addr: %s, family: %d \n", c->ifa_name, (c->ifa_addr == NULL ? "NULL" : ip_str), (c->ifa_addr == NULL ? -1 : c->ifa_addr->sa_family));
                 if (c->ifa_addr == NULL ||
                     c->ifa_addr->sa_family != ai_family ||
                     !mdns_is_interface_valuable(c))
                         continue;
+		//fprintf(stderr, "%s interface added\n", c->ifa_name);
                 nb_if++;
         }
+	//fprintf(stderr, "%ld interfaces found\n", nb_if);
         if (nb_if == 0) {
                 freeifaddrs(ifs);
                 return (MDNS_ERROR);
@@ -310,7 +346,7 @@ mdns_resolve(struct mdns_ctx *ctx, const char *addr, unsigned short port)
 
         sprintf(buf, "%hu", port);
         memset(&hints, 0, sizeof(hints));
-        hints.ai_family = AF_UNSPEC;
+        hints.ai_family = mdns_is_ipv6(addr) ? AF_INET6 : AF_INET;
         hints.ai_socktype = SOCK_DGRAM;
         hints.ai_flags = AI_NUMERICHOST | AI_NUMERICSERV;
         errno = getaddrinfo(addr, buf, &hints, &res);
@@ -378,17 +414,32 @@ mdns_init(struct mdns_ctx **p_ctx, const char *addr, unsigned short port)
                 return mdns_destroy(ctx), (MDNS_NETERR);
         res = mdns_resolve(ctx, addr, port);
         if (res < 0) {
-		printf("mdns_resolve failed: %d\n", res);
+		fprintf(stderr, "mdns_resolve failed: %d\n", res);
                 return mdns_destroy(ctx), (res);
 	}
 
         for (size_t i = 0; i < ctx->nb_conns; ++i ) {
+		char ip_str[32];
+		char multicast_addr[32];
+		char mdns_ip[32];
+		const struct sockaddr * if_sockaddr = (const struct sockaddr *) &ctx->conns[i].if_addr;
+		const struct sockaddr * mdns_if_sockaddr = (const struct sockaddr *) &ctx->conns[i].mdns_ip;
+		const struct sockaddr * mdns_sockaddr = (const struct sockaddr *) &ctx->addr;
+		memset(&ip_str, 0, sizeof(ip_str));
+		memset(&multicast_addr, 0, sizeof(multicast_addr));
+		memset(&mdns_ip, 0, sizeof(mdns_ip));
+		inet_ntop(if_sockaddr->sa_family, get_in_addr(if_sockaddr), &ip_str, sizeof(ip_str));
+		inet_ntop(ctx->conns[i].mdns_ip.family, get_in_addr(mdns_if_sockaddr), &mdns_ip, sizeof(mdns_ip));
+		inet_ntop(mdns_sockaddr->sa_family, get_in_addr(mdns_sockaddr), &multicast_addr,  sizeof(multicast_addr));
+
+		fprintf(stderr, "Setup IF_IP: %s, MULTICAST_IP: %s, MDNS_IP: %s\n", ip_str, multicast_addr, mdns_ip);
+
                 if ((ctx->conns[i].sock = socket(ctx->conns[i].mdns_ip.family, SOCK_DGRAM, IPPROTO_UDP)) == INVALID_SOCKET) {
-			printf("conn: %d, socket problem\n", i);
+			fprintf(stderr, "conn: %ld, socket problem\n", i);
                         return mdns_destroy(ctx), (MDNS_NETERR);
 		}
                 if (setsockopt(ctx->conns[i].sock, SOL_SOCKET, SO_REUSEADDR, (const void *) &on_off, sizeof(on_off)) < 0) {
-			printf("conn: %d, setsocketopt problem\n", i);
+			fprintf(stderr, "conn: %ld, setsocketopt problem\n", i);
                         return mdns_destroy(ctx), (MDNS_NETERR);
 		}
     #ifdef _WIN32
@@ -407,25 +458,25 @@ mdns_init(struct mdns_ctx **p_ctx, const char *addr, unsigned short port)
                     return mdns_destroy(ctx), (MDNS_NETERR);
 #else /* _WIN32 */
             if (bind(ctx->conns[i].sock, (const struct sockaddr *) &ctx->addr, ss_len(&ctx->addr)) < 0) {
-		    printf("conn: %d, failed to bind\n", i);
+		    fprintf(stderr, "conn: %ld, failed to bind\n", i);
                     return mdns_destroy(ctx), (MDNS_NETERR);
 	    }
 #endif /* _WIN32 */
 
             if (os_mcast_join(ctx->conns[i].sock, &ctx->addr, ctx->conns[i].if_addr) < 0) {
-		    printf("conn: %d, failed to join multicast\n", i);
+		    fprintf(stderr, "conn: %ld, failed to join multicast\n", i);
                     return mdns_destroy(ctx), (MDNS_NETERR);
 	    }
             if (setsockopt(ctx->conns[i].sock, ctx->conns[i].mdns_ip.family == AF_INET ? IPPROTO_IP : IPPROTO_IPV6,
                            ctx->conns[i].mdns_ip.family == AF_INET ? IP_MULTICAST_TTL : IPV6_MULTICAST_HOPS,
                            (const void *) &ttl, sizeof(ttl)) < 0) {
-		    printf("conn: %d, setsocketopt 2 problem\n", i);
+		    fprintf(stderr, "conn: %ld, setsocketopt 2 problem\n", i);
                     return mdns_destroy(ctx), (MDNS_NETERR);
             }
 
             if (setsockopt(ctx->conns[i].sock, ctx->conns[i].mdns_ip.family == AF_INET ? IPPROTO_IP : IPPROTO_IPV6,
                            IP_MULTICAST_LOOP, (const void *) &loop, sizeof(loop)) < 0) {
-		    printf("conn: %d, setsocketopt 3 problem\n", i);
+		    fprintf(stderr, "conn: %ld, setsocketopt 3 problem\n", i);
                     return mdns_destroy(ctx), (MDNS_NETERR);
             }
 
@@ -434,7 +485,7 @@ mdns_init(struct mdns_ctx **p_ctx, const char *addr, unsigned short port)
                            ctx->conns[i].mdns_ip.family == AF_INET ? IPPROTO_IP : IPPROTO_IPV6,
                            ctx->conns[i].mdns_ip.family == AF_INET ? IP_MULTICAST_IF : IPV6_MULTICAST_IF,
                            (const void*)&ctx->conns[i].if_addr, sizeof(ctx->conns[i].if_addr))) {
-		    printf("conn: %d, setsocketopt 4 problem\n", i);
+		    fprintf(stderr, "conn: %ld, setsocketopt 4 problem\n", i);
                     return mdns_destroy(ctx), (MDNS_NETERR);
             }
 #endif
